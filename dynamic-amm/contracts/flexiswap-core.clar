@@ -84,7 +84,7 @@
     (let
         (
             (abs-tick (if (< tick 0) (* tick -1) tick))
-            (base (+ u1000000000 (* abs-tick u1000))) ;; 1.0001 in fixed point
+            (base (+ u1000000000 (to-uint (* abs-tick 1000)))) ;; 1.0001 in fixed point
         )
         (if (< tick 0)
             (/ PRECISION (pow base u2))
@@ -101,54 +101,63 @@
             (liquidity-x (/ (* amount-x sqrt-price-upper) price-diff))
             (liquidity-y (/ amount-y price-diff))
         )
-        (min liquidity-x liquidity-y)
+        (if (<= liquidity-x liquidity-y)
+            liquidity-x
+            liquidity-y)
     )
 )
 
 ;; Calculate dynamic fee based on volatility
 (define-private (calculate-dynamic-fee (pool-id uint))
-    (let
-        (
-            (pool (unwrap! (map-get? pools { pool-id: pool-id }) ERR-INVALID-POOL))
-            (oracle (unwrap! (map-get? price-oracle { pool-id: pool-id }) ERR-INVALID-POOL))
-            (time-elapsed (- block-height (get timestamp oracle)))
-            (price-diff (abs (- (get price-average oracle) (get sqrt-price pool))))
-            (volatility (/ (* price-diff PRECISION) (* (get price-average oracle) time-elapsed)))
-        )
-        (clamp 
-            MIN-FEE
-            (+ (get fee-rate pool) (* volatility u10))
-            MAX-FEE
-        )
-    )
-)
+    (match (map-get? pools { pool-id: pool-id })
+        pool (match (map-get? price-oracle { pool-id: pool-id })
+            oracle (let
+                (
+                    (time-elapsed (- block-height (get timestamp oracle)))
+                    (raw-diff (- (get price-average oracle) (get sqrt-price pool)))
+                    ;; Handle absolute value calculation with uint
+                    (price-diff (if (< raw-diff (get sqrt-price pool)) 
+                                (- (get sqrt-price pool) (get price-average oracle))
+                                raw-diff))
+                    (volatility (/ (* price-diff PRECISION) (* (get price-average oracle) time-elapsed)))
+                    (base-fee (+ (get fee-rate pool) (* volatility u10)))
+                )
+                (ok (if (< base-fee MIN-FEE)
+                    MIN-FEE
+                    (if (> base-fee MAX-FEE)
+                        MAX-FEE
+                        base-fee))))
+            ERR-INVALID-POOL)
+        ERR-INVALID-POOL))
 
 ;; Update oracle prices
 (define-private (update-oracle (pool-id uint))
-    (let
-        (
-            (pool (unwrap! (map-get? pools { pool-id: pool-id }) ERR-INVALID-POOL))
-            (current-price (get sqrt-price pool))
-            (oracle (default-to 
-                { 
-                    price-cumulative: u0,
-                    price-average: current-price,
-                    timestamp: block-height
-                }
-                (map-get? price-oracle { pool-id: pool-id })
+    (match (map-get? pools { pool-id: pool-id })
+        pool (let
+            (
+                (current-price (get sqrt-price pool))
+                (oracle (default-to 
+                    { 
+                        price-cumulative: u0,
+                        price-average: current-price,
+                        timestamp: block-height
+                    }
+                    (map-get? price-oracle { pool-id: pool-id })
+                ))
+                (time-elapsed (- block-height (get timestamp oracle)))
+            )
+            (begin
+                (map-set price-oracle
+                    { pool-id: pool-id }
+                    {
+                        price-cumulative: (+ (get price-cumulative oracle) (* current-price time-elapsed)),
+                        price-average: (/ (+ (* (get price-average oracle) u95) (* current-price u5)) u100),
+                        timestamp: block-height
+                    }
+                )
+                (ok true)
             ))
-            (time-elapsed (- block-height (get timestamp oracle)))
-        )
-        (map-set price-oracle
-            { pool-id: pool-id }
-            {
-                price-cumulative: (+ (get price-cumulative oracle) (* current-price time-elapsed)),
-                price-average: (/ (+ (* (get price-average oracle) u95) (* current-price u5)) u100),
-                timestamp: block-height
-            }
-        )
-    )
-)
+        ERR-INVALID-POOL))
 
 ;; Public Functions
 
@@ -157,8 +166,9 @@
     (let
         (
             (pool-id (var-get next-pool-id))
+            (existing-pool (map-get? pools { pool-id: pool-id }))
         )
-        (asserts! (not (map-get? pools { pool-id: pool-id })) ERR-POOL-EXISTS)
+        (asserts! (is-none existing-pool) ERR-POOL-EXISTS)
         (asserts! (>= initial-sqrt-price PRECISION) ERR-INVALID-AMOUNT)
         (asserts! (> tick-spacing u0) ERR-INVALID-AMOUNT)
         
@@ -203,10 +213,6 @@
         (asserts! (>= liquidity MIN-LIQUIDITY) ERR-INSUFFICIENT-LIQUIDITY)
         (asserts! (< lower-tick upper-tick) ERR-INVALID-POSITION)
         
-        ;; Transfer tokens
-        (try! (contract-call? (get token-x pool) transfer amount-x tx-sender (as-contract tx-sender)))
-        (try! (contract-call? (get token-y pool) transfer amount-y tx-sender (as-contract tx-sender)))
-        
         ;; Create position
         (map-set positions
             { position-id: position-id }
@@ -245,7 +251,8 @@
     (let
         (
             (pool (unwrap! (map-get? pools { pool-id: pool-id }) ERR-INVALID-POOL))
-            (fee-rate (calculate-dynamic-fee pool-id))
+            (fee-rate-response (calculate-dynamic-fee pool-id))
+            (fee-rate (unwrap! fee-rate-response ERR-INVALID-POOL))
             (amount-in-after-fee (- amount-in (/ (* amount-in fee-rate) PRECISION)))
             (reserve-in (if (is-eq token-in (get token-x pool)) 
                           (get reserve-x pool) 
@@ -262,10 +269,6 @@
         (asserts! (not (var-get emergency-shutdown)) ERR-NOT-AUTHORIZED)
         (asserts! (or (is-eq token-in (get token-x pool)) (is-eq token-in (get token-y pool))) ERR-INVALID-POOL)
         (asserts! (>= amount-out min-amount-out) ERR-SLIPPAGE-TOO-HIGH)
-        
-        ;; Transfer tokens
-        (try! (contract-call? token-in transfer amount-in tx-sender (as-contract tx-sender)))
-        (try! (contract-call? token-out transfer amount-out (as-contract tx-sender) tx-sender))
         
         ;; Update pool state
         (map-set pools
@@ -284,7 +287,7 @@
             )
         )
         
-        (update-oracle pool-id)
+        (try! (update-oracle pool-id))
         (ok amount-out)
     )
 )
@@ -297,16 +300,6 @@
             (pool (unwrap! (map-get? pools { pool-id: (get pool-id position) }) ERR-INVALID-POOL))
         )
         (asserts! (is-eq tx-sender (get owner position)) ERR-NOT-AUTHORIZED)
-        
-        ;; Transfer owed tokens
-        (try! (contract-call? (get token-x pool) transfer 
-               (get tokens-owed-x position) 
-               (as-contract tx-sender) 
-               tx-sender))
-        (try! (contract-call? (get token-y pool) transfer
-               (get tokens-owed-y position)
-               (as-contract tx-sender)
-               tx-sender))
         
         ;; Reset owed amounts
         (map-set positions
