@@ -156,11 +156,32 @@ Returns current time-weighted average price from the oracle.
    - Verification of fee collection
    - Review of emergency procedures
 
-## Contributing
+## Project structure
 
-When contributing to this protocol, please:
-1. Write tests for new functionality
-2. Document all function parameters
-3. Follow Clarity best practices
-4. Consider gas optimization
-5. Include security considerations
+flexiswap/
+├── contracts/
+│   ├── flexiswap-core.clar     # Core AMM contract (implemented)
+│   │   - Pool creation/management
+│   │   - Position tracking
+│   │   - Swap functionality
+│   │   - Oracle integration
+│   │
+│   ├── flexiswap-math.clar     # Math libraries (next)
+│   │   - Fixed-point math
+│   │   - Square root calculations 
+│   │   - Tick/price conversions
+│   │   - Fee calculations
+│   │
+│   ├── flexiswap-factory.clar  # Pool factory (future)
+│   │   - Pool deployment
+│   │   - Fee configuration
+│   │   - Admin controls
+│   │  
+│   ├── flexiswap-position.clar  # Position management (future)
+│   │   - Position creation
+│   │   - Range orders
+│   │   - Fee collection 
+│   │
+│   └── tests/                  # Contract tests
+│
+└── README.md                   # Documentation
